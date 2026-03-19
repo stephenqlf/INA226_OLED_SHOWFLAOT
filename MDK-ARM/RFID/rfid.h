@@ -115,4 +115,9 @@ uint8_t MFRC522_WriteBlock(uint8_t blockAddr, uint8_t *data);
  */
 uint8_t MFRC522_Halt(void);
 
+uint8_t MFRC522_ReadReg(uint8_t addr);
+
+
+
+
 #endif /* __RFID_H */
