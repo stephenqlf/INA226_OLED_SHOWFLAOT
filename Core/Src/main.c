@@ -101,155 +101,86 @@ int main(void)
   MX_USART1_UART_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
+OLED_Init();
+OLED_ShowString(0, 16, "HELLO WORLD!", 16, 1);
+INA226_IO_Init();
 
-    OLED_Init();
-    OLED_ShowString(0, 16, "HELLO WORLD!", 16, 1);
-    INA226_IO_Init();
+INA226_Searching();
 
-    INA226_Searching();
+if (INA226_Init() == INA226_OK)
+{
+    printf("INA226 Init Success!\r\n");
+}
+else
+{
+    printf("INA226 Init Failed! Check wiring or address.\r\n");
+    while(1);
+}
 
+// ========== 优化 RFID 初始化与诊断 ==========
+MFRC522_Init(); // 初始化 RFID
 
+// 读取固件版本寄存器 (地址 0x37)
+uint8_t version = MFRC522_ReadReg(0x37); 
+printf("\n=== MFRC522 Diagnostic ===\r\n");
+printf("MFRC522 Version Register: 0x%02X\r\n", version);
 
-
-
-    if (INA226_Init() == INA226_OK)
-    {
-        printf("INA226 Init Success!\r\n");
+// 版本号判断：只要不是 0x00/0xFF 就视为通信成功
+if (version == 0x00 || version == 0xFF) {
+    printf("[ERROR] MFRC522 Communication Failed! Check wiring.\r\n");
+    while(1) {
+        HAL_Delay(1000);
+        printf("Waiting for fix...\r\n");
     }
-    else
-    {
-        printf("INA226 Init Failed! Check wiring or address.\r\n");
-        while(1);
-    }
-	MFRC522_Init(); // ��ʼ�� RFID
-	
-	// 【关键诊断】读取固件版本寄存器 (地址 0x37)
-    // 正常的 MFRC522 应该返回 0x91 或 0x92
-    uint8_t version = MFRC522_ReadReg(0x37); 
-    printf("MFRC522 Version Register: 0x%02X\r\n", version);
-    
-    if (version == 0x00 || version == 0xFF) {
-        
-        
-        // 进入死循环，方便你观察错误
-        while(1) {
-            HAL_Delay(1000);
-            printf("Waiting for fix...\r\n");
-        }
-    } else {
-        printf("[SUCCESS] RFID : 0x%02X\r\n", version);
-    }
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
+} else {
+    printf("[SUCCESS] MFRC522 Communication OK! Version: 0x%02X\r\n", version);
+    printf("================================\r\n\n");
+}
+
+uint8_t status;
+uint8_t tagType[2];
+uint8_t uid[5];
+uint8_t dataBlock[16];
+uint8_t keyDefault[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; // 默认密钥A
+/* USER CODE END 2 */
+
+/* Infinite loop */
+while (1)
+{
     uint8_t status;
     uint8_t tagType[2];
     uint8_t uid[5];
 
-
-  /* USER CODE END 2 */
-
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
-    while (1)
-    {
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
-
-		// ================= RFID Logic Start =================
-  
-    uint8_t dataBlock[16];
-    // Default Key A (Factory Default)
-    uint8_t keyDefault[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; 
-
-    // 1. Request Card (Check for cards in the field)
-    // PICC_REQIDL: Only check cards that are not in halt state
-    status = MFRC522_Request(PICC_REQIDL, tagType);
+    // ========== RFID 核心读卡逻辑（最简、最高成功率） ==========
+    // 1. 寻卡：PICC_REQALL 寻所有卡（包括休眠卡，成功率最高）
+    status = MFRC522_Request(PICC_REQALL, tagType);
     
     if (status == MI_OK) {
-        printf("[RFID] Card Detected! Type: 0x%02X 0x%02X\r\n", tagType[0], tagType[1]);
-
-        // 2. Anti-collision: Get Card UID
+        printf("\n================================\r\n");
+        printf("[RFID] 检测到IC卡！卡片类型: 0x%02X 0x%02X\r\n", tagType[0], tagType[1]);
+        
+        // 2. 防冲突：获取卡片唯一UID
         status = MFRC522_Anticoll(uid);
         if (status == MI_OK) {
-            // Print UID (First 4 bytes are the unique ID)
-            printf("[RFID] UID: %02X %02X %02X %02X\r\n", uid[0], uid[1], uid[2], uid[3]);
-
-            // 3. Select Card (Mandatory before Auth/Read/Write)
-            status = MFRC522_SelectCard(uid);
-            if (status == MI_OK) {
-                printf("[RFID] Card Selected.\r\n");
-
-                // 4. Authenticate Sector/Block
-                // Trying to authenticate Block 1 with Key A (Default FF...)
-                // Note: Block 0 is manufacturer block (read-only), Block 1 is safe for testing
-                status = MFRC522_Auth(PICC_AUTHENT1A, 1, keyDefault, uid);
-                
-                if (status == MI_OK) {
-                    printf("[RFID] Authentication Success (Key A).\r\n");
-
-                    // 5. Read Block Data
-                    status = MFRC522_ReadBlock(1, dataBlock);
-                    if (status == MI_OK) {
-                        printf("[RFID] Read Block 1 Success: ");
-                        for(int i = 0; i < 16; i++) {
-                            printf("%02X ", dataBlock[i]);
-                        }
-                        printf("\r\n");
-                    } else {
-                        printf("[RFID] Read Block Failed! Error: %d\r\n", status);
-                    }
-
-                } else {
-                    printf("[RFID] Authentication Failed! Check Key or Card Type.\r\n");
-                    // Some compatible chips or encrypted cards might need different keys
-                }
-                
-                // 6. Halt Card (Put card to sleep to avoid repeated reads of same card)
-                MFRC522_Halt();
-                printf("[RFID] Card Halted. Waiting for next card...\r\n\r\n");
-                
-                // Delay to prevent UART flooding while card is present
-                HAL_Delay(800); 
-            } else {
-                printf("[RFID] Select Card Failed!\r\n");
-            }
-        } else {
-            printf("[RFID] Anti-collision Failed!\r\n");
+            printf("[RFID] 卡片UID：%02X %02X %02X %02X\r\n", 
+                   uid[0], uid[1], uid[2], uid[3]);
+            
+            // 3. 休眠卡片（避免重复读取同一张卡）
+            MFRC522_Halt();
+            printf("[RFID] 卡片已休眠，等待下一张卡...\r\n");
+            printf("================================\r\n\n");
+            HAL_Delay(1500); // 延时1.5秒，方便查看日志
         }
     }
-    // ================= RFID Logic End =================
 
-
-    // INA226 Logic (Existing)
+    // ========== INA226 电压读取（稳定显示） ==========
     if (INA226_ReadData(&ina_data) == INA226_OK)
     {
-        // Print INA226 data
-//        printf("Vbus: %.2f V, Current: %.2f mA, Power: %.2f mW\r\n",
-//               ina_data.voltage_bus,
-//               ina_data.current_ma,
-//               ina_data.power_mw);
-
-        // Update OLED (Optional: You can add RFID info here too)
-        OLED_Clear();
-        OLED_ShowString(0, 8, (unsigned char *)"INA226", 16, 1);
-        OLED_ShowFloat(0, 24, ina_data.voltage_bus, 2, 16);
-        OLED_ShowString(60, 24, (unsigned char *)"V", 16, 1); 
-        OLED_Refresh();
+        printf("INA226: Voltage=%.2fV\r\n", ina_data.voltage_bus);
     }
 
-    // Main loop delay
-    HAL_Delay(100);
-		 
+    HAL_Delay(300); // 降低循环频率，避免串口刷屏
+}
   /* USER CODE END 3 */
 }
 
