@@ -2,7 +2,7 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
+  * @brief          : Main program body (Optimized RFID with OLED Display & Debounce)
   ******************************************************************************
   * @attention
   *
@@ -16,6 +16,7 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
+
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "spi.h"
@@ -25,47 +26,74 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "stm32f4xx_hal.h"
-#include "oldType.h"
 #include <stdio.h>
+#include <string.h>
 #include "oled.h"
-#include "bmp.h"
 #include "INA226.h"
 #include "delay.h"
 #include "rfid.h"
+
+// 【修复点 1】兼容 Keil V5 (ARMCC) 的 bool 类型
+// 如果编译器不支持 stdbool.h，则手动定义
+#if !defined(__cplusplus) && !defined(__STDC_VERSION__) || (__STDC_VERSION__ < 199901L)
+  #ifndef bool
+    #define bool uint8_t
+    #define true 1
+    #define false 0
+  #endif
+#else
+  #include <stdbool.h>
+#endif
 
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-
 /* USER CODE BEGIN PV */
 INA226_Data_t ina_data;
 extern SPI_HandleTypeDef hspi1;
+
+// 用于去重逻辑的全局变量
+uint8_t last_uid[5] = {0};      // 存储上一次的 UID
+uint8_t current_uid[5] = {0};   // 存储当前的 UID
+bool is_card_present = false;   // 标记当前是否有卡
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-/* USER CODE BEGIN PFP */
 
+/* USER CODE BEGIN PFP */
+// 辅助函数：比较两个 UID 是否相同
+bool CompareUID(uint8_t *uid1, uint8_t *uid2) {
+    for (int i = 0; i < 4; i++) {
+        if (uid1[i] != uid2[i]) return false;
+    }
+    return true;
+}
+
+// 【修复点 2】修复 OLED_ShowString 参数类型警告
+// 将 const char* 强制转换为 u8* 以匹配你的 OLED 库定义
+void UpdateOLED_Status(const char* line1, const char* line2, const char* line3) {
+    OLED_Clear();
+    if(line1) OLED_ShowString(0, 0, (u8*)line1, 16, 1);
+    if(line2) OLED_ShowString(0, 16, (u8*)line2, 16, 1);
+    if(line3) OLED_ShowString(0, 32, (u8*)line3, 16, 1);
+}
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
 /* USER CODE END 0 */
 
 /**
@@ -74,113 +102,143 @@ void SystemClock_Config(void);
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-
   /* USER CODE BEGIN Init */
-
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-    delay_init();
-	
+  delay_init();
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   MX_SPI1_Init();
+
   /* USER CODE BEGIN 2 */
-OLED_Init();
-OLED_ShowString(0, 16, "HELLO WORLD!", 16, 1);
-INA226_IO_Init();
+  
+  // --- 1. OLED 初始化 ---
+  OLED_Init();
+  OLED_Clear();
+  OLED_ShowString(0, 0, (u8*)"System Starting...", 16, 1);
+  
+  // --- 2. INA226 初始化 ---
+  INA226_IO_Init();
+  INA226_Searching();
+  
+  char ina_status_str[20];
+  if (INA226_Init() == INA226_OK) {
+      printf("INA226 Init Success!\r\n");
+      sprintf(ina_status_str, "INA226: OK");
+  } else {
+      printf("INA226 Init Failed!\r\n");
+      sprintf(ina_status_str, "INA226: FAIL");
+  }
+  
+  // --- 3. RFID 初始化与诊断 ---
+  RFID_Init(); 
+  uint8_t version = RFID_ReadReg(0x37); // VersionReg address
+  printf("RC522 Version Register: 0x%02X\r\n", version);
 
-INA226_Searching();
+  char rfid_status_str[20];
+  // 支持 0x91, 0x92 (NXP) 和 0x82 (Clone)
+  if (version == 0x91 || version == 0x92 || version == 0x82) {
+      printf("[SUCCESS] RFID Comm OK! Ver: 0x%02X\r\n", version);
+      sprintf(rfid_status_str, "RFID: OK (0x%02X)", version);
+  } else {
+      printf("[ERROR] RFID Comm Failed! Got: 0x%02X\r\n", version);
+      sprintf(rfid_status_str, "RFID: FAIL (0x%02X)", version);
+      // 如果 RFID 失败，显示错误并卡死，方便调试
+      UpdateOLED_Status(rfid_status_str, "Check Wiring!", NULL);
+      while(1); 
+  }
 
-if (INA226_Init() == INA226_OK)
-{
-    printf("INA226 Init Success!\r\n");
-}
-else
-{
-    printf("INA226 Init Failed! Check wiring or address.\r\n");
-    while(1);
-}
+  // 显示初始状态页
+  UpdateOLED_Status(rfid_status_str, ina_status_str, "Waiting for Card...");
+  HAL_Delay(1000); // 让用户看清初始化结果
+  
+  // 清空缓冲区，准备进入主循环
+  memset(last_uid, 0, 5);
+  
+  /* USER CODE END 2 */
 
-// ========== 优化 RFID 初始化与诊断 ==========
-MFRC522_Init(); // 初始化 RFID
-
-// 读取固件版本寄存器 (地址 0x37)
-uint8_t version = MFRC522_ReadReg(0x37); 
-printf("\n=== MFRC522 Diagnostic ===\r\n");
-printf("MFRC522 Version Register: 0x%02X\r\n", version);
-
-// 版本号判断：只要不是 0x00/0xFF 就视为通信成功
-if (version == 0x00 || version == 0xFF) {
-    printf("[ERROR] MFRC522 Communication Failed! Check wiring.\r\n");
-    while(1) {
-        HAL_Delay(1000);
-        printf("Waiting for fix...\r\n");
-    }
-} else {
-    printf("[SUCCESS] MFRC522 Communication OK! Version: 0x%02X\r\n", version);
-    printf("================================\r\n\n");
-}
-
-uint8_t status;
-uint8_t tagType[2];
-uint8_t uid[5];
-uint8_t dataBlock[16];
-uint8_t keyDefault[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; // 默认密钥A
-/* USER CODE END 2 */
-
-/* Infinite loop */
-while (1)
-{
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
     uint8_t status;
     uint8_t tagType[2];
-    uint8_t uid[5];
-
-    // ========== RFID 核心读卡逻辑（最简、最高成功率） ==========
-    // 1. 寻卡：PICC_REQALL 寻所有卡（包括休眠卡，成功率最高）
-    status = MFRC522_Request(PICC_REQALL, tagType);
+    
+    // 1. 尝试寻卡
+    status = RFID_Request(PICC_REQIDL, tagType);
     
     if (status == MI_OK) {
-        printf("\n================================\r\n");
-        printf("[RFID] 检测到IC卡！卡片类型: 0x%02X 0x%02X\r\n", tagType[0], tagType[1]);
+        // 2. 防冲突获取 UID
+        status = RFID_Anticoll(current_uid);
         
-        // 2. 防冲突：获取卡片唯一UID
-        status = MFRC522_Anticoll(uid);
         if (status == MI_OK) {
-            printf("[RFID] 卡片UID：%02X %02X %02X %02X\r\n", 
-                   uid[0], uid[1], uid[2], uid[3]);
+            // 成功读取到 UID
             
-            // 3. 休眠卡片（避免重复读取同一张卡）
-            MFRC522_Halt();
-            printf("[RFID] 卡片已休眠，等待下一张卡...\r\n");
-            printf("================================\r\n\n");
-            HAL_Delay(1500); // 延时1.5秒，方便查看日志
+            // 检查是否是同一张卡 (去重)
+            if (!is_card_present || !CompareUID(last_uid, current_uid)) {
+                // 情况 A: 新卡片插入 或 卡片更换
+                
+                is_card_present = true;
+                
+                // 复制当前 UID 到 last_uid
+                memcpy(last_uid, current_uid, 4);
+                
+                // --- 硬件反馈 ---
+                HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5); // 翻转 LED
+                
+                // --- 串口打印 ---
+                printf("\n[NEW CARD] Detected!\r\n");
+                printf("UID: %02X %02X %02X %02X\r\n", current_uid[0], current_uid[1], current_uid[2], current_uid[3]);
+                
+                // --- OLED 显示更新 ---
+                char uid_buf[20];
+                sprintf(uid_buf, "%02X %02X %02X %02X", current_uid[0], current_uid[1], current_uid[2], current_uid[3]);
+                
+                OLED_Clear(); // 清屏以防残留
+                OLED_ShowString(0, 0, (u8*)"Card Detected!", 16, 1);
+                OLED_ShowString(0, 16, (u8*)"UID:", 16, 1);
+                // 【修复点 3】强制转换 uid_buf 为 u8*
+                OLED_ShowString(48, 16, (u8*)uid_buf, 16, 1); 
+            } else {
+                // 情况 B: 同一张卡持续存在，不做任何操作 (防止刷屏)
+            }
+        } else {
+            // 防冲突失败，可能是干扰或卡片移开过快
+            is_card_present = false;
+        }
+    } else {
+        // 未检测到卡片
+        if (is_card_present) {
+            // 情况 C: 卡片被移除
+            is_card_present = false;
+            printf("[INFO] Card Removed.\r\n");
+            
+            // 恢复 OLED 到等待界面
+            OLED_Clear();
+            // 【修复点 4】强制转换状态字符串
+            OLED_ShowString(0, 0, (u8*)rfid_status_str, 12, 1); 
+            OLED_ShowString(0, 16, (u8*)ina_status_str, 12, 1);
+            OLED_ShowString(0, 32, (u8*)"Waiting...", 16, 1);
         }
     }
-
-    // ========== INA226 电压读取（稳定显示） ==========
-    if (INA226_ReadData(&ina_data) == INA226_OK)
-    {
-        printf("INA226: Voltage=%.2fV\r\n", ina_data.voltage_bus);
-    }
-
-    HAL_Delay(300); // 降低循环频率，避免串口刷屏
-}
+    
+    // 适当延时，降低轮询频率
+    HAL_Delay(100); 
+    /* USER CODE END WHILE */
+  }
   /* USER CODE END 3 */
 }
 
@@ -230,7 +288,6 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-
 /* USER CODE END 4 */
 
 /**
@@ -240,13 +297,13 @@ void SystemClock_Config(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-    /* User can add his own implementation to report the HAL error return state */
-    __disable_irq();
-    while (1)
-    {
-    }
+  __disable_irq();
+  while (1)
+  {
+  }
   /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
@@ -258,8 +315,8 @@ void Error_Handler(void)
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
-    /* User can add his own implementation to report the file name and line number,
-       ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
